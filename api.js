@@ -478,3 +478,372 @@ app.listen(PORT, '0.0.0.0', async function() {
 });
 
 module.exports = app;
+
+// ═══════════════════════════════════════════════════
+// SPORTS ENDPOINTS — FIFA, WWE, Live Sports
+// ═══════════════════════════════════════════════════
+
+const SPORT_API = 'https://h5-sport-api.aoneroom.com';
+const SPORT_SITE = 'https://sportslivetoday.com';
+
+// Sports API fetch
+async function sportFetch(path) {
+  const res = await api.get(SPORT_API + path, {
+    headers: { 'User-Agent': UA, 'Accept': 'application/json', 'Origin': SPORT_SITE, 'Referer': SPORT_SITE + '/' }
+  });
+  if (res.data && res.data.code === 0) return res.data.data;
+  throw new Error('Sport API error: ' + (res.data?.code || 'unknown'));
+}
+
+// Parse sports HTML (NUXT format)
+function resolveSportNuxt(html) {
+  const $ = cheerio.load(html);
+  const raw = $('script#__NUXT_DATA__').text();
+  if (!raw) return null;
+  const nuxt = JSON.parse(raw);
+  function R(ref, depth = 0) {
+    if (depth > 15 || ref === null || ref === undefined) return ref;
+    if (typeof ref === 'string' || typeof ref === 'boolean') return ref;
+    if (typeof ref === 'number') {
+      if (ref < 0 || ref >= nuxt.length) return ref;
+      return R(nuxt[ref], depth + 1);
+    }
+    if (Array.isArray(ref)) return ref.map(r => R(r, depth + 1));
+    if (typeof ref === 'object') {
+      const out = {};
+      for (const [k, v] of Object.entries(ref)) {
+        if (['subjects','items','banner','liveList','cover','image','stills'].includes(k)) {
+          out[k] = R(v, depth + 1);
+        } else if (typeof v === 'number') {
+          out[k] = R(v, depth + 1);
+        } else {
+          out[k] = v;
+        }
+      }
+      return out;
+    }
+    return ref;
+  }
+  return { nuxt, R };
+}
+
+// ═══ SPORTS ENDPOINTS ═══
+
+// Get all sports sections (FIFA, WWE, Live)
+app.get('/api/sports', async (req, res) => {
+  try {
+    const data = await sportFetch('/wefeed-h5api-bff/home?host=sportslivetoday.com');
+    const sections = (data.operatingList || []).map(item => ({
+      title: item.title,
+      type: item.type,
+      position: item.position,
+      subjectCount: item.subjects?.length || 0,
+      hasLiveList: !!item.liveList,
+      subjects: (item.subjects || []).map(s => ({
+        id: s.subjectId,
+        title: s.title,
+        poster: s.cover?.url || null,
+        slug: s.detailPath,
+        hasResource: s.hasResource || false
+      }))
+    }));
+    res.json({ success: true, source: 'h5-sport-api', sections });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Get FIFA World Cup section
+app.get('/api/sports/fifa', async (req, res) => {
+  try {
+    const data = await sportFetch('/wefeed-h5api-bff/home?host=sportslivetoday.com');
+    const fifa = (data.operatingList || []).find(s => 
+      s.title?.toLowerCase().includes('fifa') || s.title?.toLowerCase().includes('world cup')
+    );
+    if (!fifa) return res.status(404).json({ error: 'FIFA section not found' });
+    
+    res.json({
+      success: true,
+      title: fifa.title,
+      type: fifa.type,
+      matches: (fifa.subjects || []).map(s => ({
+        id: s.subjectId,
+        title: s.title,
+        poster: s.cover?.url || null,
+        slug: s.detailPath,
+        hasResource: s.hasResource || false
+      })),
+      liveList: fifa.liveList || null
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Get WWE section
+app.get('/api/sports/wwe', async (req, res) => {
+  try {
+    const data = await sportFetch('/wefeed-h5api-bff/home?host=sportslivetoday.com');
+    const wwe = (data.operatingList || []).find(s => 
+      s.title?.toLowerCase().includes('wwe') || s.title?.toLowerCase().includes('wrestling')
+    );
+    if (!wwe) return res.status(404).json({ error: 'WWE section not found' });
+    
+    res.json({
+      success: true,
+      title: wwe.title,
+      type: wwe.type,
+      events: (wwe.subjects || []).map(s => ({
+        id: s.subjectId,
+        title: s.title,
+        poster: s.cover?.url || null,
+        slug: s.detailPath,
+        hasResource: s.hasResource || false
+      }))
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Get live sports
+app.get('/api/sports/live', async (req, res) => {
+  try {
+    const data = await sportFetch('/wefeed-h5api-bff/home?host=sportslivetoday.com');
+    const live = (data.operatingList || []).find(s => s.type === 'SPORT_LIVE');
+    if (!live) return res.status(404).json({ error: 'No live sports' });
+    
+    res.json({
+      success: true,
+      title: live.title,
+      liveNow: (live.liveList || []).map(l => ({
+        id: l.subjectId,
+        title: l.title,
+        poster: l.cover?.url || null,
+        status: l.status || 'live',
+        viewers: l.viewCount || 0
+      })),
+      upcoming: (live.subjects || []).map(s => ({
+        id: s.subjectId,
+        title: s.title,
+        poster: s.cover?.url || null,
+        slug: s.detailPath
+      }))
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Get match details
+app.get('/api/sports/match/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const html = await api.get(`${SPORT_SITE}/detail/${id}`, {
+      headers: { 'User-Agent': UA, 'Accept': 'text/html' }
+    });
+    const parsed = resolveSportNuxt(html.data);
+    if (!parsed) return res.status(404).json({ error: 'Match not found' });
+    
+    let match = null;
+    for (let i = 0; i < Math.min(parsed.nuxt.length, 50); i++) {
+      const r = parsed.R(parsed.nuxt[i]);
+      if (r?.subjectId) { match = r; break; }
+    }
+    
+    if (!match) return res.status(404).json({ error: 'Match data not found' });
+    
+    res.json({
+      success: true,
+      id: match.subjectId,
+      title: match.title,
+      description: match.description || '',
+      poster: match.cover?.url || null,
+      streams: (match.streams || []).map(s => ({
+        quality: s.resolutions + 'p',
+        url: s.url,
+        format: s.format
+      }))
+    });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// Get sport streams
+app.get('/api/sports/stream/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const detailPath = req.query.detail_path || '';
+    
+    // Try the sport API for streams
+    const data = await sportFetch(`/wefeed-h5api-bff/subject/play?subjectId=${id}&detailPath=${encodeURIComponent(detailPath)}`);
+    
+    const streams = (data.streams || []).map(s => ({
+      quality: s.resolutions + 'p',
+      format: s.format,
+      url: s.url,
+      size_mb: Math.round(parseInt(s.size || '0') / 1024 / 1024),
+      duration_sec: s.duration
+    })).sort((a, b) => parseInt(b.quality) - parseInt(a.quality));
+    
+    res.json({ success: true, id, streams });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ═══════════════════════════════════════════════════
+// SPORTS PROVIDER CHAIN — Multiple backup sources
+// ═══════════════════════════════════════════════════
+
+// Provider 1: H5 Sport API (primary)
+const SPORT_PROVIDERS = [
+  {
+    name: "h5-sport-api",
+    baseUrl: "https://h5-sport-api.aoneroom.com",
+    async getHomepage() {
+      const res = await api.get(`${this.baseUrl}/wefeed-h5api-bff/home?host=sportslivetoday.com`, {
+        headers: { 'User-Agent': UA, 'Origin': 'https://sportslivetoday.com' }
+      });
+      if (res.data?.code === 0) return res.data.data;
+      throw new Error('H5 API failed');
+    },
+    async getStream(subjectId, sportType = 'football') {
+      const res = await api.get(`${this.baseUrl}/wefeed-h5api-bff/subject/play?subjectId=${subjectId}&sportType=${sportType}`, {
+        headers: { 'User-Agent': UA, 'Origin': 'https://sportsnow.top' }
+      });
+      if (res.data?.code === 0) return res.data.data;
+      throw new Error('H5 stream failed');
+    }
+  },
+  {
+    name: "sportsnow-scraper",
+    baseUrl: "https://sportsnow.top",
+    async getStream(subjectId, sportType = 'football') {
+      const html = await api.get(`${this.baseUrl}/live/detail?id=${subjectId}&sportType=${sportType}`, {
+        headers: { 'User-Agent': UA }
+      });
+      const $ = cheerio.load(html.data);
+      // Try to find NUXT data with stream info
+      const nuxtRaw = $('script#__NUXT_DATA__').text();
+      if (!nuxtRaw) throw new Error('No NUXT data');
+      const nuxt = JSON.parse(nuxtRaw);
+      // Walk NUXT to find streams (dynamic keys)
+      function findStreams(obj, depth = 0) {
+        if (depth > 10) return null;
+        if (!obj || typeof obj !== 'object') return null;
+        if (obj.streams && Array.isArray(obj.streams)) return obj;
+        for (const v of Object.values(obj)) {
+          const found = findStreams(v, depth + 1);
+          if (found) return found;
+        }
+        return null;
+      }
+      const data = findStreams(nuxt);
+      if (data?.streams?.length) return data;
+      throw new Error('No streams found in page');
+    }
+  },
+  {
+    name: "aisports-scraper",
+    baseUrl: "https://aisports.cc",
+    async getStream(subjectId, sportType = 'football') {
+      try {
+        const res = await api.get(`${this.baseUrl}/live/detail?id=${subjectId}&sportType=${sportType}`, {
+          headers: { 'User-Agent': UA }
+        });
+        const $ = cheerio.load(res.data);
+        const nuxtRaw = $('script#__NUXT_DATA__').text();
+        if (!nuxtRaw) throw new Error('No data');
+        const nuxt = JSON.parse(nuxtRaw);
+        // Same recursive search
+        function find(obj, d = 0) {
+          if (d > 10 || !obj || typeof obj !== 'object') return null;
+          if (obj.streams?.length) return obj;
+          for (const v of Object.values(obj)) {
+            const f = find(v, d + 1);
+            if (f) return f;
+          }
+          return null;
+        }
+        const data = find(nuxt);
+        if (data?.streams) return data;
+        throw new Error('No streams');
+      } catch(e) {
+        throw new Error('AIsports failed: ' + e.message);
+      }
+    }
+  },
+  {
+    name: "pacdn-direct",
+    baseUrl: "https://pacdn.aoneroom.com",
+    async getStream(subjectId, sportType = 'football') {
+      // Try direct CDN access — sometimes streams are on pacdn
+      const res = await api.get(`${this.baseUrl}/media/sport/${subjectId}/index.m3u8`, {
+        headers: { 'User-Agent': UA, 'Origin': 'https://sportslivetoday.com' },
+        validateStatus: () => true
+      });
+      if (res.status === 200) {
+        return {
+          streams: [{ url: `${this.baseUrl}/media/sport/${subjectId}/index.m3u8`, format: 'hls', quality: 'adaptive' }]
+        };
+      }
+      throw new Error('No direct CDN stream');
+    }
+  }
+];
+
+// Sports provider chain — tries each provider until one works
+async function getSportsWithFallback(type, ...args) {
+  const errors = [];
+  for (const provider of SPORT_PROVIDERS) {
+    try {
+      if (type === 'homepage' && provider.getHomepage) {
+        return { data: await provider.getHomepage(), provider: provider.name };
+      }
+      if (type === 'stream' && provider.getStream) {
+        return { data: await provider.getStream(...args), provider: provider.name };
+      }
+    } catch (e) {
+      errors.push(`${provider.name}: ${e.message}`);
+    }
+  }
+  throw new Error(`All providers failed: ${errors.join(' | ')}`);
+}
+
+// Updated sports endpoint with provider chain
+app.get('/api/sports/v2', async (req, res) => {
+  try {
+    const { data, provider } = await getSportsWithFallback('homepage');
+    const sections = (data.operatingList || []).map(item => ({
+      title: item.title,
+      type: item.type,
+      subjectCount: item.subjects?.length || 0,
+      hasLiveList: !!item.liveList,
+      subjects: (item.subjects || []).map(s => ({
+        id: s.subjectId,
+        title: s.title,
+        poster: s.cover?.url || null,
+        slug: s.detailPath
+      }))
+    }));
+    res.json({ success: true, provider, sections });
+  } catch(e) { res.status(500).json({ error: e.message, tried: SPORT_PROVIDERS.map(p => p.name) }); }
+});
+
+// Updated stream endpoint with provider chain
+app.get('/api/sports/stream-v2/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const sportType = req.query.sportType || 'football';
+    const { data, provider } = await getSportsWithFallback('stream', id, sportType);
+    
+    res.json({
+      success: true,
+      id,
+      provider,
+      hasResource: data.hasResource || false,
+      streams: (data.streams || []).map(s => ({
+        quality: s.resolutions ? s.resolutions + 'p' : s.quality || 'HD',
+        format: s.format || 'hls',
+        url: s.url || s.src || ''
+      })),
+      hls: data.hls || [],
+      dash: data.dash || []
+    });
+  } catch(e) {
+    res.status(500).json({ 
+      error: e.message, 
+      tried: SPORT_PROVIDERS.map(p => p.name) 
+    });
+  }
+});
