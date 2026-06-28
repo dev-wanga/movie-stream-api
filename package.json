@@ -1,0 +1,16 @@
+{
+  "name": "movie-stream-dl",
+  "version": "1.0.0",
+  "description": "MovieBox API - scrape, search, stream, download",
+  "main": "api.js",
+  "scripts": {
+    "start": "node api.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "axios": "^1.6.0",
+    "cheerio": "^1.0.0",
+    "tough-cookie": "^4.1.0",
+    "axios-cookiejar-support": "^4.0.0"
+  }
+}
